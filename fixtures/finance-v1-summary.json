@@ -1,0 +1,42 @@
+{
+  "schema_version": "finance.v1",
+  "service": "book-finance-api",
+  "period": "2026-08",
+  "source_of_truth": "sqlite.finance_control_plane",
+  "transactions": [
+    {
+      "currency": "THB",
+      "count": 2,
+      "income": 1000,
+      "expense": 250,
+      "net": 750
+    }
+  ],
+  "revenue": [
+    {
+      "currency": "THB",
+      "count": 1,
+      "total": 1000,
+      "received": 1000,
+      "pending": 0
+    }
+  ],
+  "invoices": [
+    {
+      "status": "paid",
+      "currency": "THB",
+      "count": 1,
+      "amount": 1000
+    }
+  ],
+  "accounts": {
+    "active": 1
+  },
+  "liabilities": [
+    {
+      "currency": "THB",
+      "count": 1,
+      "outstanding": 50
+    }
+  ]
+}
