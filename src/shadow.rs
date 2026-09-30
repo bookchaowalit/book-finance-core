@@ -36,6 +36,14 @@ pub enum ShadowError {
         section: &'static str,
         currency: Currency,
     },
+    /// Two invoice rows share a status and currency, so a consumer summing
+    /// or keying by (status, currency) would double count or drop one.
+    DuplicateInvoiceGroup {
+        status: String,
+        currency: Currency,
+    },
+    /// An invoice status that is empty or has surrounding whitespace.
+    InvalidInvoiceStatus,
 }
 
 impl fmt::Display for ShadowError {
@@ -78,6 +86,11 @@ impl fmt::Display for ShadowError {
             Self::DuplicateCurrencyGroup { section, currency } => {
                 write!(formatter, "duplicate {currency} group in {section}")
             }
+            Self::DuplicateInvoiceGroup { status, currency } => {
+                write!(formatter, "duplicate {status}/{currency} group in invoices")
+            }
+            Self::InvalidInvoiceStatus => formatter
+                .write_str("invoice status must be non-empty without surrounding whitespace"),
         }
     }
 }
@@ -208,6 +221,15 @@ impl FinanceV1Summary {
             .into_iter()
             .map(InvoiceAggregate::try_from)
             .collect::<Result<Vec<_>, _>>()?;
+        let mut invoice_groups = HashSet::new();
+        for invoice in &invoices {
+            if !invoice_groups.insert((invoice.status.as_str(), invoice.currency)) {
+                return Err(ShadowError::DuplicateInvoiceGroup {
+                    status: invoice.status.clone(),
+                    currency: invoice.currency,
+                });
+            }
+        }
 
         let liabilities = raw
             .liabilities
@@ -273,6 +295,10 @@ impl JsonAmount {
 struct RawSummary {
     schema_version: String,
     service: String,
+    /// Required but nullable: a missing key is contract drift (for example a
+    /// rename), not an unscoped period. `deserialize_with` turns off serde's
+    /// implicit `None` for a missing `Option` field.
+    #[serde(deserialize_with = "required_nullable_string")]
     period: Option<String>,
     source_of_truth: String,
     transactions: Vec<RawTransactionAggregate>,
@@ -381,6 +407,9 @@ impl TryFrom<RawInvoiceAggregate> for InvoiceAggregate {
     type Error = ShadowError;
 
     fn try_from(raw: RawInvoiceAggregate) -> Result<Self, Self::Error> {
+        if raw.status.is_empty() || raw.status.trim() != raw.status {
+            return Err(ShadowError::InvalidInvoiceStatus);
+        }
         let currency = parse_currency(&raw.currency)?;
         Ok(Self {
             status: raw.status,
@@ -402,6 +431,13 @@ impl TryFrom<RawLiabilityAggregate> for LiabilityAggregate {
             outstanding: raw.outstanding.money(currency)?,
         })
     }
+}
+
+fn required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
 }
 
 fn parse_currency(value: &str) -> Result<Currency, ShadowError> {

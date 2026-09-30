@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "finance-v1.schema.json",
+  "title": "finance.v1 sanitized summary",
+  "description": "Read contract for GET /api/finance/v1 as parsed by FinanceV1Summary::from_json. Every object rejects unknown fields. Amounts are JSON numbers without exponents or decimal strings, with at most the currency's minor-unit digits (JPY 0, THB/USD/EUR/GBP 2, BTC 8, ETH 18). Cross-field rules not expressible here: transactions.net = income - expense; revenue.total = received + pending; currencies are unique within transactions, revenue and liabilities; (status, currency) is unique within invoices; invoice status is non-empty without surrounding whitespace.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "service", "period", "source_of_truth", "transactions", "revenue", "invoices", "accounts", "liabilities"],
+  "properties": {
+    "schema_version": { "const": "finance.v1" },
+    "service": { "const": "book-finance-api" },
+    "period": { "type": ["string", "null"], "description": "Reporting period label, e.g. 2026-08; null when unscoped." },
+    "source_of_truth": { "const": "sqlite.finance_control_plane" },
+    "transactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["currency", "count", "income", "expense", "net"],
+        "properties": {
+          "currency": { "$ref": "#/$defs/currency" },
+          "count": { "$ref": "#/$defs/count" },
+          "income": { "$ref": "#/$defs/amount" },
+          "expense": { "$ref": "#/$defs/amount" },
+          "net": { "$ref": "#/$defs/amount" }
+        }
+      }
+    },
+    "revenue": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["currency", "count", "total", "received", "pending"],
+        "properties": {
+          "currency": { "$ref": "#/$defs/currency" },
+          "count": { "$ref": "#/$defs/count" },
+          "total": { "$ref": "#/$defs/amount" },
+          "received": { "$ref": "#/$defs/amount" },
+          "pending": { "$ref": "#/$defs/amount" }
+        }
+      }
+    },
+    "invoices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "currency", "count", "amount"],
+        "properties": {
+          "status": { "type": "string", "minLength": 1, "description": "Open set until the Finance API owner publishes the full list." },
+          "currency": { "$ref": "#/$defs/currency" },
+          "count": { "$ref": "#/$defs/count" },
+          "amount": { "$ref": "#/$defs/amount" }
+        }
+      }
+    },
+    "accounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active"],
+      "properties": {
+        "active": { "$ref": "#/$defs/count" }
+      }
+    },
+    "liabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["currency", "count", "outstanding"],
+        "properties": {
+          "currency": { "$ref": "#/$defs/currency" },
+          "count": { "$ref": "#/$defs/count" },
+          "outstanding": { "$ref": "#/$defs/amount" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "currency": { "type": "string", "description": "Case-insensitive; surrounding whitespace ignored.", "enum": ["THB", "USD", "EUR", "GBP", "JPY", "BTC", "ETH"] },
+    "count": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "amount": { "type": ["number", "string"], "pattern": "^\\s*[+-]?[0-9]+(\\.[0-9]+)?\\s*$" }
+  }
+}

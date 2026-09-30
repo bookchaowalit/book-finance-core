@@ -2,9 +2,10 @@
 
 ## Current state
 
-Score: 8/10 (was 7/10 after pass 1, 6/10 before) — small, well-typed,
-fail-closed money kernel with integer minor units, CI, property tests and a
-float-free allocation primitive; invoice status is still an open string.
+Score: 8.5/10 (8 after pass 2, 7 after pass 1, 6 before) — small,
+well-typed, fail-closed money kernel with integer minor units, CI, property
+tests, a float-free allocation primitive and a schema-pinned `finance.v1`
+contract; invoice status is still an open set.
 
 ## Backlog
 
@@ -15,12 +16,13 @@ float-free allocation primitive; invoice status is still an open string.
 - Validate `InvoiceAggregate.status` against a closed set instead of any string.
   Blocked on the Finance API contract: the fixture only shows `paid`; get the
   full status list from the API owner before closing the set (an unknown value
-  would then fail the shadow read closed).
+  would then fail the shadow read closed). Evidence so far (root repo scripts,
+  no DB CHECK constraint): `draft`, `sent`, `overdue`, `paid`.
 
 ### P2
-- Consider a `Currency`-scale table test that pins ISO 4217 minor units.
 - Add a `cargo deny`/`cargo audit` job once the dependency set grows.
-- Document the `finance.v1` fixture contract in a short schema file.
+- Have the root repo's `task test:finance-shadow` also validate the live API
+  response against `fixtures/finance-v1.schema.json`.
 
 ## Done in pass 1
 - Fixed: JSON number amounts were parsed via `f64` (exponent forms like `1e3`
@@ -44,3 +46,19 @@ float-free allocation primitive; invoice status is still an open string.
   dependencies) for parse/format round trip (20k cases), allocation
   conservation and per-part bounds (20k cases), and ledger balance
   conservation across 2k multi-posting entries.
+
+## Done in this pass (pass 3)
+- Fixed: duplicate invoice `(status, currency)` groups were accepted (a
+  consumer keying by them would double count or drop one); they now fail with
+  `ShadowError::DuplicateInvoiceGroup`. Empty or whitespace-padded invoice
+  statuses fail with `InvalidInvoiceStatus`.
+- Fixed: a missing `period` key parsed as `None` (serde's implicit default for
+  `Option`), hiding a renamed or dropped field; `period` is now required but
+  nullable, matching the API, which always sends it.
+- Added `fixtures/finance-v1.schema.json` (JSON Schema for the read contract)
+  and `tests/contract_schema_test.rs`, which checks schema, fixture and parser
+  field sets agree (every field required, unknown fields rejected, constants
+  and currencies match the code). It found the `period` gap above.
+- Added `tests/currency_scale_test.rs` pinning code and minor-unit scale for
+  every currency (ISO 4217 for fiat; satoshi/wei for BTC/ETH), with an
+  exhaustive match so a new variant cannot skip the table.

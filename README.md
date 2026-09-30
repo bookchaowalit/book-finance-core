@@ -14,7 +14,13 @@ invariants.
 
 The `finance.v1` summary fixture is sanitized contract input for the local
 read-only shadow parser. It validates the typed read model and aggregate
-invariants without opening the live API or any data store.
+invariants without opening the live API or any data store. The contract is
+documented as JSON Schema in `fixtures/finance-v1.schema.json` (fields, types,
+currencies, amount syntax, and the cross-field rules in its description);
+`tests/contract_schema_test.rs` fails if the schema, the fixture and the
+parser's accepted fields drift apart. Every field is required (`period` may be
+`null` but not missing), invoice `(status, currency)` groups must be unique,
+and invoice status must be a non-empty token.
 
 The root repository adds a loopback-only harness with `task test:finance-shadow`:
 it starts the current API against synthetic temporary data and pipes the JSON
@@ -61,7 +67,8 @@ production cutover.
 - deterministic property tests (`tests/property_test.rs`, fixed seed, no extra
   dependencies) for parse/format round trips, allocation conservation, and
   ledger balance conservation;
-- typed `finance.v1` summary parsing with fail-closed contract drift checks.
+- typed `finance.v1` summary parsing with fail-closed contract drift checks;
+- pinned minor-unit scale per currency (`tests/currency_scale_test.rs`).
 - a feature-gated, non-money-moving reconciliation preview command.
 
 ## Verification
