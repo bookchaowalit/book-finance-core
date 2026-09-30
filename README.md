@@ -34,20 +34,26 @@ idempotency and redacted audit evidence only.
 
 ## Current status
 
-This is a local product scaffold under the Book Dev boundary. It has no
-external `origin` yet and is intentionally not listed as an external GitHub
-repository until a remote is deliberately created and registered. The root
-repository must not treat this as a production cutover.
+This is a product scaffold under the Book Dev boundary, hosted at
+`github.com/bookchaowalit/book-finance-core`. GitHub Actions runs
+`scripts/check.sh` (tests, rustfmt, clippy with `-D warnings`) plus a build on
+the declared `rust-version`. The root repository must not treat this as a
+production cutover.
 
 ## Invariants covered
 
-- currency-aware fixed-point money represented as integer minor units;
+- currency-aware fixed-point money represented as integer minor units
+  (`i128`); no floating-point type is used for amounts anywhere;
+- JSON number amounts are read from their literal text (serde_json
+  `arbitrary_precision`), so they never round-trip through `f64`; exponent
+  notation such as `1e3` fails closed;
+- lossless decimal formatting via `Money::to_decimal_string`;
 - explicit currency precision for THB, USD, EUR, GBP, JPY, BTC, and ETH;
 - no cross-currency arithmetic;
 - positive postings only;
 - balanced single-currency ledger entries;
 - idempotent transaction identifiers in a ledger book;
-- deterministic account balance projection.
+- deterministic account balance projection;
 - typed `finance.v1` summary parsing with fail-closed contract drift checks.
 - a feature-gated, non-money-moving reconciliation preview command.
 
