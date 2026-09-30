@@ -253,6 +253,21 @@ impl Money {
         self.minor_units == 0
     }
 
+    /// Format the amount as a plain decimal string with exactly the
+    /// currency's scale, e.g. `-12.34` for THB or `1500` for JPY. The output
+    /// round-trips through [`Money::parse`] without loss.
+    pub fn to_decimal_string(self) -> String {
+        let scale = self.currency.scale() as usize;
+        let sign = if self.minor_units < 0 { "-" } else { "" };
+        let digits = self.minor_units.unsigned_abs().to_string();
+        if scale == 0 {
+            return format!("{sign}{digits}");
+        }
+        let padded = format!("{digits:0>width$}", width = scale + 1);
+        let (whole, fraction) = padded.split_at(padded.len() - scale);
+        format!("{sign}{whole}.{fraction}")
+    }
+
     fn ensure_currency(self, other: Self) -> Result<(), DomainError> {
         if self.currency == other.currency {
             Ok(())
@@ -573,6 +588,151 @@ mod tests {
             book.account_balance(&account("income:revenue"), Currency::Thb)
                 .expect("revenue balance"),
             thb("-100.00")
+        );
+    }
+
+    #[test]
+    fn parses_signs_and_pads_missing_fraction_digits() {
+        assert_eq!(thb("-12.3").minor_units(), -1_230);
+        assert_eq!(thb("+7").minor_units(), 700);
+        assert_eq!(thb(" 0.05 ").minor_units(), 5);
+        assert!(thb("-0.00").is_zero());
+    }
+
+    #[test]
+    fn applies_each_currency_scale_exactly() {
+        let jpy = Money::parse(Currency::Jpy, "1500").expect("valid JPY");
+        assert_eq!(jpy.minor_units(), 1_500);
+        assert_eq!(
+            Money::parse(Currency::Jpy, "1.5"),
+            Err(DomainError::PrecisionExceeded {
+                currency: Currency::Jpy,
+                scale: 0,
+            })
+        );
+
+        let btc = Money::parse(Currency::Btc, "0.00000001").expect("one satoshi");
+        assert_eq!(btc.minor_units(), 1);
+
+        let eth = Money::parse(Currency::Eth, "1.000000000000000001").expect("valid wei");
+        assert_eq!(eth.minor_units(), 1_000_000_000_000_000_001);
+    }
+
+    #[test]
+    fn rejects_malformed_amounts() {
+        for raw in [
+            "", " ", "-", "+", ".5", "1.2.3", "1,000.00", "1e3", "0x10", "12a", "--1", "+-1",
+            "NaN", "inf", "１２",
+        ] {
+            assert_eq!(
+                Money::parse(Currency::Thb, raw),
+                Err(DomainError::InvalidAmount),
+                "{raw:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_amounts_that_overflow_minor_units() {
+        let too_large = format!("{}", i128::MAX);
+        assert_eq!(
+            Money::parse(Currency::Thb, &too_large),
+            Err(DomainError::InvalidAmount)
+        );
+        assert_eq!(
+            Money::new(Currency::Thb, i128::MAX).checked_add(thb("0.01")),
+            Err(DomainError::InvalidAmount)
+        );
+        assert_eq!(
+            Money::new(Currency::Thb, i128::MIN).checked_neg(),
+            Err(DomainError::InvalidAmount)
+        );
+    }
+
+    #[test]
+    fn formats_decimal_strings_that_round_trip() {
+        let cases = [
+            (Currency::Thb, 1_234, "12.34"),
+            (Currency::Thb, -5, "-0.05"),
+            (Currency::Thb, 0, "0.00"),
+            (Currency::Jpy, -1_500, "-1500"),
+            (Currency::Btc, 1, "0.00000001"),
+            (Currency::Eth, 10_i128.pow(18), "1.000000000000000000"),
+            (
+                Currency::Usd,
+                i128::MIN,
+                "-1701411834604692317316873037158841057.28",
+            ),
+        ];
+        for (currency, minor_units, expected) in cases {
+            let money = Money::new(currency, minor_units);
+            assert_eq!(money.to_decimal_string(), expected);
+            if minor_units != i128::MIN {
+                assert_eq!(Money::parse(currency, expected), Ok(money));
+            }
+        }
+    }
+
+    #[test]
+    fn postings_must_be_strictly_positive() {
+        assert_eq!(
+            Posting::debit(account("asset:cash"), thb("0.00")),
+            Err(DomainError::NonPositivePosting)
+        );
+        assert_eq!(
+            Posting::credit(account("asset:cash"), thb("-1.00")),
+            Err(DomainError::NonPositivePosting)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_and_mixed_currency_entries() {
+        assert_eq!(
+            LedgerEntry::try_new(transaction("tx-empty"), []),
+            Err(DomainError::EmptyEntry)
+        );
+        let usd = Money::parse(Currency::Usd, "100.00").expect("valid USD");
+        assert_eq!(
+            LedgerEntry::try_new(
+                transaction("tx-mixed"),
+                [
+                    Posting::debit(account("asset:cash"), thb("100.00")).expect("valid debit"),
+                    Posting::credit(account("income:revenue"), usd).expect("valid credit"),
+                ],
+            ),
+            Err(DomainError::MixedCurrencies)
+        );
+    }
+
+    #[test]
+    fn rejects_blank_identifiers() {
+        assert_eq!(
+            AccountId::new("   "),
+            Err(DomainError::EmptyIdentifier { kind: "account" })
+        );
+        assert_eq!(
+            TransactionId::new(""),
+            Err(DomainError::EmptyIdentifier {
+                kind: "transaction"
+            })
+        );
+    }
+
+    #[test]
+    fn balance_projection_fails_closed_on_currency_mismatch() {
+        let mut book = LedgerBook::default();
+        book.post(balanced_entry("tx-001")).expect("post succeeds");
+
+        assert_eq!(
+            book.account_balance(&account("asset:cash"), Currency::Usd),
+            Err(DomainError::CurrencyMismatch {
+                expected: Currency::Usd,
+                actual: Currency::Thb,
+            })
+        );
+        assert_eq!(
+            book.account_balance(&account("asset:unused"), Currency::Thb),
+            Ok(Money::new(Currency::Thb, 0))
         );
     }
 
