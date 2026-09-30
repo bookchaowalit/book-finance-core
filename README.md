@@ -48,12 +48,19 @@ production cutover.
   `arbitrary_precision`), so they never round-trip through `f64`; exponent
   notation such as `1e3` fails closed;
 - lossless decimal formatting via `Money::to_decimal_string`;
+- canonical amount text only: a trailing dot such as `1.` is rejected;
+- float-free splitting via `Money::allocate(&weights)` (largest remainder:
+  parts sum exactly to the original, each within one minor unit of its
+  proportional share, zero weights get zero);
 - explicit currency precision for THB, USD, EUR, GBP, JPY, BTC, and ETH;
 - no cross-currency arithmetic;
 - positive postings only;
 - balanced single-currency ledger entries;
 - idempotent transaction identifiers in a ledger book;
 - deterministic account balance projection;
+- deterministic property tests (`tests/property_test.rs`, fixed seed, no extra
+  dependencies) for parse/format round trips, allocation conservation, and
+  ledger balance conservation;
 - typed `finance.v1` summary parsing with fail-closed contract drift checks.
 - a feature-gated, non-money-moving reconciliation preview command.
 
