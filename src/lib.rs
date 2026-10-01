@@ -92,6 +92,8 @@ pub enum DomainError {
         credit_minor: i128,
     },
     DuplicateTransaction(TransactionId),
+    /// Allocation needs a weight total between 1 and `u64::MAX`.
+    InvalidAllocation,
 }
 
 impl fmt::Display for DomainError {
@@ -129,6 +131,9 @@ impl fmt::Display for DomainError {
                 formatter,
                 "entry is unbalanced in {currency}: debit={debit_minor}, credit={credit_minor}"
             ),
+            Self::InvalidAllocation => {
+                formatter.write_str("allocation weights must sum to between 1 and u64::MAX")
+            }
             Self::DuplicateTransaction(transaction_id) => {
                 write!(
                     formatter,
@@ -170,7 +175,13 @@ impl Money {
         };
         let mut pieces = unsigned.split('.');
         let whole = pieces.next().unwrap_or_default();
-        let fraction = pieces.next().unwrap_or_default();
+        let fraction = pieces.next();
+        // A trailing dot ("1.") is rejected: it is not a canonical amount and
+        // `to_decimal_string` never produces it.
+        if fraction == Some("") {
+            return Err(DomainError::InvalidAmount);
+        }
+        let fraction = fraction.unwrap_or_default();
         if pieces.next().is_some()
             || whole.is_empty()
             || !whole.bytes().all(|byte| byte.is_ascii_digit())
@@ -251,6 +262,79 @@ impl Money {
 
     pub const fn is_zero(self) -> bool {
         self.minor_units == 0
+    }
+
+    /// Format the amount as a plain decimal string with exactly the
+    /// currency's scale, e.g. `-12.34` for THB or `1500` for JPY. The output
+    /// round-trips through [`Money::parse`] without loss.
+    pub fn to_decimal_string(self) -> String {
+        let scale = self.currency.scale() as usize;
+        let sign = if self.minor_units < 0 { "-" } else { "" };
+        let digits = self.minor_units.unsigned_abs().to_string();
+        if scale == 0 {
+            return format!("{sign}{digits}");
+        }
+        let padded = format!("{digits:0>width$}", width = scale + 1);
+        let (whole, fraction) = padded.split_at(padded.len() - scale);
+        format!("{sign}{whole}.{fraction}")
+    }
+
+    /// Split the amount into parts proportional to `weights` without floats.
+    ///
+    /// Uses the largest-remainder method on integer minor units: each part
+    /// gets `floor(amount * weight / total)`, then the leftover minor units go
+    /// one at a time to the parts with the largest remainders (ties go to the
+    /// earlier part). The parts always sum exactly to `self`, have the same
+    /// currency, and a zero weight always receives zero. Negative amounts are
+    /// split by magnitude and negated, so `-x` splits as the negation of `x`.
+    /// The weights must sum to at least 1 and at most `u64::MAX`, which keeps
+    /// every intermediate product inside `u128`.
+    pub fn allocate(self, weights: &[u64]) -> Result<Vec<Self>, DomainError> {
+        let total_weight = weights
+            .iter()
+            .try_fold(0_u128, |sum, weight| sum.checked_add(u128::from(*weight)))
+            .ok_or(DomainError::InvalidAllocation)?;
+        if total_weight == 0 || total_weight > u128::from(u64::MAX) {
+            return Err(DomainError::InvalidAllocation);
+        }
+        let magnitude = self.minor_units.unsigned_abs();
+        let mut shares = Vec::with_capacity(weights.len());
+        let mut remainders = Vec::with_capacity(weights.len());
+        let mut allocated = 0_u128;
+        for (index, weight) in weights.iter().enumerate() {
+            let weight = u128::from(*weight);
+            // magnitude * weight can exceed u128, so divide in two steps:
+            // (q * total + r) * w / total = q * w + r * w / total, where
+            // r < total <= u64::MAX and w <= u64::MAX, so r * w fits in u128.
+            let quotient = magnitude / total_weight;
+            let rest = magnitude % total_weight;
+            let rest_product = rest.checked_mul(weight).ok_or(DomainError::InvalidAmount)?;
+            let share = quotient
+                .checked_mul(weight)
+                .and_then(|value| value.checked_add(rest_product / total_weight))
+                .ok_or(DomainError::InvalidAmount)?;
+            shares.push(share);
+            remainders.push((rest_product % total_weight, index));
+            allocated += share;
+        }
+        let mut leftover = magnitude - allocated;
+        remainders.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+        for (remainder, index) in remainders {
+            if leftover == 0 || remainder == 0 {
+                break;
+            }
+            shares[index] += 1;
+            leftover -= 1;
+        }
+        debug_assert_eq!(leftover, 0);
+        shares
+            .into_iter()
+            .map(|share| {
+                let share = i128::try_from(share).map_err(|_| DomainError::InvalidAmount)?;
+                let signed = if self.minor_units < 0 { -share } else { share };
+                Ok(Self::new(self.currency, signed))
+            })
+            .collect()
     }
 
     fn ensure_currency(self, other: Self) -> Result<(), DomainError> {
@@ -573,6 +657,203 @@ mod tests {
             book.account_balance(&account("income:revenue"), Currency::Thb)
                 .expect("revenue balance"),
             thb("-100.00")
+        );
+    }
+
+    #[test]
+    fn parses_signs_and_pads_missing_fraction_digits() {
+        assert_eq!(thb("-12.3").minor_units(), -1_230);
+        assert_eq!(thb("+7").minor_units(), 700);
+        assert_eq!(thb(" 0.05 ").minor_units(), 5);
+        assert!(thb("-0.00").is_zero());
+    }
+
+    #[test]
+    fn applies_each_currency_scale_exactly() {
+        let jpy = Money::parse(Currency::Jpy, "1500").expect("valid JPY");
+        assert_eq!(jpy.minor_units(), 1_500);
+        assert_eq!(
+            Money::parse(Currency::Jpy, "1.5"),
+            Err(DomainError::PrecisionExceeded {
+                currency: Currency::Jpy,
+                scale: 0,
+            })
+        );
+
+        let btc = Money::parse(Currency::Btc, "0.00000001").expect("one satoshi");
+        assert_eq!(btc.minor_units(), 1);
+
+        let eth = Money::parse(Currency::Eth, "1.000000000000000001").expect("valid wei");
+        assert_eq!(eth.minor_units(), 1_000_000_000_000_000_001);
+    }
+
+    #[test]
+    fn rejects_malformed_amounts() {
+        for raw in [
+            "", " ", "-", "+", ".5", "1.2.3", "1,000.00", "1e3", "0x10", "12a", "--1", "+-1",
+            "NaN", "inf", "１２", "1.", "-1.", "+0.", "1. ",
+        ] {
+            assert_eq!(
+                Money::parse(Currency::Thb, raw),
+                Err(DomainError::InvalidAmount),
+                "{raw:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_amounts_that_overflow_minor_units() {
+        let too_large = format!("{}", i128::MAX);
+        assert_eq!(
+            Money::parse(Currency::Thb, &too_large),
+            Err(DomainError::InvalidAmount)
+        );
+        assert_eq!(
+            Money::new(Currency::Thb, i128::MAX).checked_add(thb("0.01")),
+            Err(DomainError::InvalidAmount)
+        );
+        assert_eq!(
+            Money::new(Currency::Thb, i128::MIN).checked_neg(),
+            Err(DomainError::InvalidAmount)
+        );
+    }
+
+    #[test]
+    fn formats_decimal_strings_that_round_trip() {
+        let cases = [
+            (Currency::Thb, 1_234, "12.34"),
+            (Currency::Thb, -5, "-0.05"),
+            (Currency::Thb, 0, "0.00"),
+            (Currency::Jpy, -1_500, "-1500"),
+            (Currency::Btc, 1, "0.00000001"),
+            (Currency::Eth, 10_i128.pow(18), "1.000000000000000000"),
+            (
+                Currency::Usd,
+                i128::MIN,
+                "-1701411834604692317316873037158841057.28",
+            ),
+        ];
+        for (currency, minor_units, expected) in cases {
+            let money = Money::new(currency, minor_units);
+            assert_eq!(money.to_decimal_string(), expected);
+            if minor_units != i128::MIN {
+                assert_eq!(Money::parse(currency, expected), Ok(money));
+            }
+        }
+    }
+
+    #[test]
+    fn postings_must_be_strictly_positive() {
+        assert_eq!(
+            Posting::debit(account("asset:cash"), thb("0.00")),
+            Err(DomainError::NonPositivePosting)
+        );
+        assert_eq!(
+            Posting::credit(account("asset:cash"), thb("-1.00")),
+            Err(DomainError::NonPositivePosting)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_and_mixed_currency_entries() {
+        assert_eq!(
+            LedgerEntry::try_new(transaction("tx-empty"), []),
+            Err(DomainError::EmptyEntry)
+        );
+        let usd = Money::parse(Currency::Usd, "100.00").expect("valid USD");
+        assert_eq!(
+            LedgerEntry::try_new(
+                transaction("tx-mixed"),
+                [
+                    Posting::debit(account("asset:cash"), thb("100.00")).expect("valid debit"),
+                    Posting::credit(account("income:revenue"), usd).expect("valid credit"),
+                ],
+            ),
+            Err(DomainError::MixedCurrencies)
+        );
+    }
+
+    #[test]
+    fn rejects_blank_identifiers() {
+        assert_eq!(
+            AccountId::new("   "),
+            Err(DomainError::EmptyIdentifier { kind: "account" })
+        );
+        assert_eq!(
+            TransactionId::new(""),
+            Err(DomainError::EmptyIdentifier {
+                kind: "transaction"
+            })
+        );
+    }
+
+    #[test]
+    fn balance_projection_fails_closed_on_currency_mismatch() {
+        let mut book = LedgerBook::default();
+        book.post(balanced_entry("tx-001")).expect("post succeeds");
+
+        assert_eq!(
+            book.account_balance(&account("asset:cash"), Currency::Usd),
+            Err(DomainError::CurrencyMismatch {
+                expected: Currency::Usd,
+                actual: Currency::Thb,
+            })
+        );
+        assert_eq!(
+            book.account_balance(&account("asset:unused"), Currency::Thb),
+            Ok(Money::new(Currency::Thb, 0))
+        );
+    }
+
+    #[test]
+    fn allocates_with_largest_remainder_and_exact_sum() {
+        let parts = thb("100.00").allocate(&[1, 1, 1]).expect("valid split");
+        assert_eq!(parts, vec![thb("33.34"), thb("33.33"), thb("33.33")]);
+
+        let parts = thb("0.05").allocate(&[3, 0, 7]).expect("valid split");
+        assert_eq!(parts, vec![thb("0.02"), thb("0.00"), thb("0.03")]);
+
+        let parts = thb("-100.00").allocate(&[1, 1, 1]).expect("valid split");
+        assert_eq!(parts, vec![thb("-33.34"), thb("-33.33"), thb("-33.33")]);
+
+        let jpy = Money::new(Currency::Jpy, 10);
+        assert_eq!(
+            jpy.allocate(&[1, 2]).expect("valid split"),
+            vec![Money::new(Currency::Jpy, 3), Money::new(Currency::Jpy, 7)]
+        );
+    }
+
+    #[test]
+    fn allocation_handles_extreme_amounts_and_weights() {
+        let big = Money::new(Currency::Eth, i128::MAX);
+        let parts = big
+            .allocate(&[u64::MAX / 2, u64::MAX / 2, 1])
+            .expect("valid split");
+        let sum = parts
+            .iter()
+            .try_fold(Money::new(Currency::Eth, 0), |acc, part| {
+                acc.checked_add(*part)
+            })
+            .expect("sum fits");
+        assert_eq!(sum, big);
+
+        let min = Money::new(Currency::Thb, i128::MIN);
+        assert_eq!(min.allocate(&[1]), Err(DomainError::InvalidAmount));
+    }
+
+    #[test]
+    fn allocation_rejects_missing_or_zero_weights() {
+        assert_eq!(
+            thb("1.00").allocate(&[]),
+            Err(DomainError::InvalidAllocation)
+        );
+        assert_eq!(
+            thb("1.00").allocate(&[0, 0]),
+            Err(DomainError::InvalidAllocation)
+        );
+        assert_eq!(
+            thb("1.00").allocate(&[u64::MAX, 1]),
+            Err(DomainError::InvalidAllocation)
         );
     }
 

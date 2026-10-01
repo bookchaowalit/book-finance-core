@@ -220,6 +220,33 @@ mod tests {
     }
 
     #[test]
+    fn envelope_round_trip_keeps_exact_amount_literals() {
+        let precise = SUMMARY
+            .replace("\"income\": 1000", "\"income\": 1234567890123456.78")
+            .replace("\"net\": 750", "\"net\": 1234567890123206.78");
+        let envelope = envelope("preview-precise-001", &precise);
+
+        assert_eq!(
+            envelope.summary.transactions[0].income.minor_units(),
+            123_456_789_012_345_678
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_idempotency_keys() {
+        for key in ["", "-leading", "has space", "semi;colon", &"a".repeat(256)] {
+            assert!(
+                matches!(
+                    IdempotencyKey::new(key),
+                    Err(CommandError::InvalidIdempotencyKey)
+                ),
+                "{key:?} must be rejected"
+            );
+        }
+        assert!(IdempotencyKey::new("a".repeat(255)).is_ok());
+    }
+
+    #[test]
     fn rejects_unknown_envelope_fields() {
         let input = format!(
             r#"{{"command":"{RECONCILIATION_PREVIEW_COMMAND}","idempotency_key":"preview-001","summary":{SUMMARY},"unexpected":true}}"#

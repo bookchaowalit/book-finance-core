@@ -53,3 +53,127 @@ fn rejects_unknown_fields_to_make_contract_drift_visible() {
 
     assert!(matches!(error, ShadowError::Json(_)));
 }
+
+fn summary_with_transaction(income: &str, expense: &str, net: &str) -> String {
+    FINANCE_V1_SUMMARY
+        .replace("\"income\": 1000", &format!("\"income\": {income}"))
+        .replace("\"expense\": 250", &format!("\"expense\": {expense}"))
+        .replace("\"net\": 750", &format!("\"net\": {net}"))
+}
+
+#[test]
+fn json_number_amounts_keep_their_exact_decimal_text() {
+    // 17 significant digits cannot round-trip through f64; the kernel must
+    // parse the literal text rather than a float approximation.
+    let input = summary_with_transaction("1234567890123456.78", "0.01", "1234567890123456.77");
+    let summary = FinanceV1Summary::from_json(&input).expect("exact decimal literals parse");
+
+    assert_eq!(
+        summary.transactions[0].income.minor_units(),
+        123_456_789_012_345_678
+    );
+    assert_eq!(summary.transactions[0].expense.minor_units(), 1);
+    assert_eq!(
+        summary.transactions[0].net.minor_units(),
+        123_456_789_012_345_677
+    );
+}
+
+#[test]
+fn json_number_amounts_beyond_u64_stay_exact() {
+    let input = summary_with_transaction("100000000000000000000", "0", "100000000000000000000");
+    let summary = FinanceV1Summary::from_json(&input).expect("large integer literal parses");
+
+    assert_eq!(
+        summary.transactions[0].income.minor_units(),
+        10_000_000_000_000_000_000_000
+    );
+}
+
+#[test]
+fn exponent_notation_amounts_fail_closed() {
+    let input = summary_with_transaction("1e3", "250", "750");
+    let error = FinanceV1Summary::from_json(&input).expect_err("exponent notation must fail");
+
+    assert!(matches!(error, ShadowError::Domain(_)));
+}
+
+#[test]
+fn decimal_string_amounts_are_accepted() {
+    let input = summary_with_transaction("\"1000.50\"", "\"250.25\"", "\"750.25\"");
+    let summary = FinanceV1Summary::from_json(&input).expect("decimal strings parse");
+
+    assert_eq!(summary.transactions[0].net.minor_units(), 75_025);
+}
+
+#[test]
+fn over_precise_amounts_are_rejected_for_the_currency_scale() {
+    let input = summary_with_transaction("1000.001", "250", "750.001");
+    let error = FinanceV1Summary::from_json(&input).expect_err("THB allows two decimals");
+
+    assert!(matches!(error, ShadowError::Domain(_)));
+}
+
+const PAID_INVOICE: &str = "{\n      \"status\": \"paid\",\n      \"currency\": \"THB\",\n      \"count\": 1,\n      \"amount\": 1000\n    }";
+
+fn summary_with_invoices(invoices: &[&str]) -> String {
+    assert!(
+        FINANCE_V1_SUMMARY.contains(PAID_INVOICE),
+        "fixture invoice shape changed"
+    );
+    FINANCE_V1_SUMMARY.replace(PAID_INVOICE, &invoices.join(",\n    "))
+}
+
+fn invoice(status: &str, currency: &str) -> String {
+    format!(
+        "{{\"status\": \"{status}\", \"currency\": \"{currency}\", \"count\": 1, \"amount\": 10}}"
+    )
+}
+
+#[test]
+fn distinct_invoice_status_and_currency_groups_are_accepted() {
+    let (paid_usd, open_thb) = (invoice("paid", "USD"), invoice("open", "THB"));
+    let input = summary_with_invoices(&[PAID_INVOICE, &paid_usd, &open_thb]);
+    let summary = FinanceV1Summary::from_json(&input).expect("distinct groups parse");
+
+    assert_eq!(summary.parity().invoice_groups, 3);
+}
+
+#[test]
+fn duplicate_invoice_groups_fail_closed() {
+    let duplicate = invoice("paid", "thb");
+    let input = summary_with_invoices(&[PAID_INVOICE, &duplicate]);
+    let error = FinanceV1Summary::from_json(&input).expect_err("duplicate group must fail");
+
+    assert!(matches!(
+        error,
+        ShadowError::DuplicateInvoiceGroup { ref status, currency: Currency::Thb } if status == "paid"
+    ));
+    assert_eq!(error.to_string(), "duplicate paid/THB group in invoices");
+}
+
+#[test]
+fn blank_or_padded_invoice_status_fails_closed() {
+    for status in ["", "   ", " paid", "paid "] {
+        let row = invoice(status, "THB");
+        let error = FinanceV1Summary::from_json(&summary_with_invoices(&[&row]))
+            .expect_err("status must be a clean token");
+
+        assert!(
+            matches!(error, ShadowError::InvalidInvoiceStatus),
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn period_may_be_null_but_not_missing() {
+    let null_period = FINANCE_V1_SUMMARY.replace("\"period\": \"2026-08\"", "\"period\": null");
+    let summary = FinanceV1Summary::from_json(&null_period).expect("null period parses");
+    assert_eq!(summary.parity().period, None);
+
+    let missing = FINANCE_V1_SUMMARY.replace("  \"period\": \"2026-08\",\n", "");
+    assert_ne!(missing, FINANCE_V1_SUMMARY);
+    let error = FinanceV1Summary::from_json(&missing).expect_err("missing period is drift");
+    assert!(matches!(error, ShadowError::Json(_)));
+}

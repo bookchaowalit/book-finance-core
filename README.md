@@ -8,13 +8,21 @@ invariants.
 
 - no database access;
 - no network access;
-- no credentials or environment-dependent configuration;
+- no credentials; the only environment input is the exact opt-in flag
+  `FINANCE_CORE_COMMANDS_ENABLED=true` read by the `finance-command-pilot`
+  binary (any other value keeps the command disabled);
 - no production API connection;
 - no writes to the existing Solo Empire or BookTrading data stores.
 
 The `finance.v1` summary fixture is sanitized contract input for the local
 read-only shadow parser. It validates the typed read model and aggregate
-invariants without opening the live API or any data store.
+invariants without opening the live API or any data store. The contract is
+documented as JSON Schema in `fixtures/finance-v1.schema.json` (fields, types,
+currencies, amount syntax, and the cross-field rules in its description);
+`tests/contract_schema_test.rs` fails if the schema, the fixture and the
+parser's accepted fields drift apart. Every field is required (`period` may be
+`null` but not missing), invoice `(status, currency)` groups must be unique,
+and invoice status must be a non-empty token.
 
 The root repository adds a loopback-only harness with `task test:finance-shadow`:
 it starts the current API against synthetic temporary data and pipes the JSON
@@ -34,21 +42,35 @@ idempotency and redacted audit evidence only.
 
 ## Current status
 
-This is a local product scaffold under the Book Dev boundary. It has no
-external `origin` yet and is intentionally not listed as an external GitHub
-repository until a remote is deliberately created and registered. The root
-repository must not treat this as a production cutover.
+This is a product scaffold under the Book Dev boundary, hosted at
+`github.com/bookchaowalit/book-finance-core`. GitHub Actions runs
+`scripts/check.sh` (tests, rustfmt, clippy with `-D warnings`) plus a build on
+the declared `rust-version`. The root repository must not treat this as a
+production cutover.
 
 ## Invariants covered
 
-- currency-aware fixed-point money represented as integer minor units;
+- currency-aware fixed-point money represented as integer minor units
+  (`i128`); no floating-point type is used for amounts anywhere;
+- JSON number amounts are read from their literal text (serde_json
+  `arbitrary_precision`), so they never round-trip through `f64`; exponent
+  notation such as `1e3` fails closed;
+- lossless decimal formatting via `Money::to_decimal_string`;
+- canonical amount text only: a trailing dot such as `1.` is rejected;
+- float-free splitting via `Money::allocate(&weights)` (largest remainder:
+  parts sum exactly to the original, each within one minor unit of its
+  proportional share, zero weights get zero);
 - explicit currency precision for THB, USD, EUR, GBP, JPY, BTC, and ETH;
 - no cross-currency arithmetic;
 - positive postings only;
 - balanced single-currency ledger entries;
 - idempotent transaction identifiers in a ledger book;
-- deterministic account balance projection.
-- typed `finance.v1` summary parsing with fail-closed contract drift checks.
+- deterministic account balance projection;
+- deterministic property tests (`tests/property_test.rs`, fixed seed, no extra
+  dependencies) for parse/format round trips, allocation conservation, and
+  ledger balance conservation;
+- typed `finance.v1` summary parsing with fail-closed contract drift checks;
+- pinned minor-unit scale per currency (`tests/currency_scale_test.rs`).
 - a feature-gated, non-money-moving reconciliation preview command.
 
 ## Verification
