@@ -8,7 +8,9 @@ invariants.
 
 - no database access;
 - no network access;
-- no credentials or environment-dependent configuration;
+- no credentials; the only environment input is the exact opt-in flag
+  `FINANCE_CORE_COMMANDS_ENABLED=true` read by the `finance-command-pilot`
+  binary (any other value keeps the command disabled);
 - no production API connection;
 - no writes to the existing Solo Empire or BookTrading data stores.
 
