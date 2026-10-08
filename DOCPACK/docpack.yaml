@@ -1,0 +1,8 @@
+system_id: bookchaowalit/book-products/book-finance-core
+prefix: CARD
+brand: "BOOK FINANCE CORE"
+subtitle: "แกน Rust สำหรับเงินและบัญชีคู่ ที่ตรวจ invariant อย่างเข้มงวด"
+footer: "Book Finance Core — Product Card"
+color: "#2f4b6e"
+audience: internal
+tier: L0
