@@ -43,7 +43,7 @@ idempotency and redacted audit evidence only.
 ## Current status
 
 This is a product scaffold under the Book Dev boundary, hosted at
-`github.com/bookchaowalit/finance-ledger-core`. GitHub Actions runs
+`github.com/bookchaowalit/book-finance-core`. GitHub Actions runs
 `scripts/check.sh` (tests, rustfmt, clippy with `-D warnings`) plus a build on
 the declared `rust-version`. The root repository must not treat this as a
 production cutover.
