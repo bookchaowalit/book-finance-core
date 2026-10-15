@@ -75,6 +75,11 @@ production cutover.
 
 ## Verification
 
+`Cargo.lock` is committed so local checks and CI use the same dependency
+resolution. Run tests and lint with `--locked`; update the lockfile deliberately
+with a dependency change, review its diff, and verify both stable Rust and the
+declared minimum supported Rust version before merging it.
+
 The repository owns its complete offline check; Solo Empire delegates to this
 entrypoint without choosing Cargo flags or test subsets:
 
