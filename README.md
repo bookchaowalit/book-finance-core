@@ -48,6 +48,15 @@ This is a product scaffold under the Book Dev boundary, hosted at
 the declared `rust-version`. The root repository must not treat this as a
 production cutover.
 
+The authenticated finance API boundary (`/api/finance/v1`) is not owned by this
+kernel. [BOO-140 gate evidence](docs/gates/BOO-140-finance-api-boundary.md)
+maps each contract endpoint to its current owner and the proposed
+`book-finance-api` facade (owner decision proposed, not accepted).
+`tests/kernel_purity_test.rs` fails if the kernel gains network, HTTP,
+database, auth, environment or runtime filesystem dependencies, and
+`tests/api_boundary_compat_test.rs` pins the public API its consumers use
+against `fixtures/gates/finance-api-boundary.json`.
+
 ## Invariants covered
 
 - currency-aware fixed-point money represented as integer minor units
