@@ -223,12 +223,15 @@ fn tokenize(source: &str) -> Vec<Token> {
             tokens.push(Token::PathSep);
             i += 2;
         } else if c.is_alphabetic() || c == '_' {
+            if c == 'r' && next == Some('#') {
+                i += 2; // raw identifier `r#name`
+            }
             let start = i;
             while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                 i += 1;
             }
             let ident: String = chars[start..i].iter().collect();
-            tokens.push(Token::Ident(ident.trim_start_matches("r#").to_owned()));
+            tokens.push(Token::Ident(ident));
         } else if c.is_ascii_digit() {
             while i < chars.len()
                 && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.')
@@ -280,72 +283,119 @@ fn ident(token: Option<&Token>) -> Option<&str> {
     }
 }
 
-/// Top-level module names reached through `std::`, `core::` or `alloc::`,
-/// including grouped imports such as `use std::{fmt, fs};`.
-fn std_modules(tokens: &[Token]) -> Vec<String> {
-    let mut modules = Vec::new();
+/// What one source file reaches through `std::`, `core::` or `alloc::`.
+#[derive(Debug, Default)]
+struct StdUses {
+    /// Full paths below the root, use-trees expanded: `use std::{fmt, io::{self, Read}}`
+    /// gives `fmt`, `io`, `io::Read`; `std::process::exit(1)` gives `process::exit`.
+    paths: Vec<String>,
+    /// `std::*` or a glob anywhere inside a std use-tree.
+    glob: bool,
+    /// `as` anywhere inside a std use-tree (`std::{self as s}`, `std::env as e`)
+    /// or directly after the root (`use std as s`).
+    alias: bool,
+}
+
+/// Parse one use-tree (or expression path) at `i`, below `prefix`.
+/// Always advances at least one token.
+fn std_tree(tokens: &[Token], mut i: usize, prefix: &[String], out: &mut StdUses) -> usize {
+    match tokens.get(i) {
+        Some(Token::Punct('*')) => {
+            out.glob = true;
+            i + 1
+        }
+        Some(Token::Punct('{')) => {
+            i += 1;
+            while let Some(token) = tokens.get(i) {
+                match token {
+                    Token::Punct('}') => return i + 1,
+                    Token::Punct(',') => i += 1,
+                    _ => i = std_tree(tokens, i, prefix, out),
+                }
+            }
+            i
+        }
+        Some(Token::Ident(name)) => {
+            let mut path = prefix.to_vec();
+            if name != "self" {
+                path.push(name.clone());
+            }
+            i += 1;
+            if ident(tokens.get(i)) == Some("as") {
+                out.alias = true;
+                out.paths.push(path.join("::"));
+                return i + 2;
+            }
+            if tokens.get(i) == Some(&Token::PathSep)
+                && matches!(
+                    tokens.get(i + 1),
+                    Some(Token::Ident(_) | Token::Punct('{') | Token::Punct('*'))
+                )
+            {
+                return std_tree(tokens, i + 1, &path, out);
+            }
+            out.paths.push(path.join("::"));
+            i
+        }
+        _ => i + 1,
+    }
+}
+
+fn std_uses(tokens: &[Token]) -> StdUses {
+    let mut out = StdUses::default();
     for i in 0..tokens.len() {
         if !matches!(ident(tokens.get(i)), Some("std" | "core" | "alloc")) {
             continue;
         }
-        if tokens.get(i + 1) != Some(&Token::PathSep) {
-            continue;
-        }
-        match tokens.get(i + 2) {
-            Some(Token::Ident(name)) => modules.push(name.clone()),
-            Some(Token::Punct('{')) => {
-                let mut depth = 0;
-                let mut expect_root = true;
-                for token in &tokens[i + 2..] {
-                    match token {
-                        Token::Punct('{') => {
-                            depth += 1;
-                            expect_root = depth == 1;
-                        }
-                        Token::Punct('}') => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        Token::Punct(',') if depth == 1 => expect_root = true,
-                        Token::Ident(name) if expect_root && depth == 1 => {
-                            modules.push(name.clone());
-                            expect_root = false;
-                        }
-                        _ => {
-                            if depth == 1 {
-                                expect_root = false;
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
+        if tokens.get(i + 1) == Some(&Token::PathSep) {
+            std_tree(tokens, i + 2, &[], &mut out);
+        } else if ident(tokens.get(i + 1)) == Some("as") {
+            out.alias = true;
         }
     }
-    modules
+    out
 }
 
-/// Purity violations in one source file. `allowed_std` lists std modules the
-/// file may reach (binary adapters may use stdio and the exit code);
-/// `env_var_allowance` names the one environment variable constant a binary
-/// may read with `env::var`.
-fn violations(
-    source: &str,
-    policy: &Value,
-    allowed_std: &BTreeSet<String>,
-    env_var_allowance: Option<&str>,
-) -> Vec<String> {
+/// What a file may reach. The library may reach no runtime I/O module at all;
+/// a binary adapter may reach only the listed std items (`io::stdin`,
+/// `process::ExitCode`, ...) and read at most one declared env constant.
+enum Scope<'a> {
+    Library,
+    Binary {
+        allowed_items: &'a BTreeSet<String>,
+        env_var: Option<&'a str>,
+    },
+}
+
+/// Purity violations in one source file.
+fn violations(source: &str, policy: &Value, scope: &Scope) -> Vec<String> {
     let tokens = tokenize(source);
     let forbidden_std = string_set(&policy["forbidden_std_modules"]);
     let forbidden_crates = string_set(&policy["forbidden_crates"]);
     let forbidden_idents = string_set(&policy["forbidden_identifiers"]);
+    let env_var_allowance = match scope {
+        Scope::Library => None,
+        Scope::Binary { env_var, .. } => *env_var,
+    };
     let mut found = Vec::new();
 
-    for module in std_modules(&tokens) {
-        if forbidden_std.contains(&module) && !allowed_std.contains(&module) {
-            found.push(format!("std::{module}"));
+    let uses = std_uses(&tokens);
+    if uses.glob {
+        found.push("std glob import".to_owned());
+    }
+    if uses.alias {
+        found.push("std alias (`as`)".to_owned());
+    }
+    for path in &uses.paths {
+        let root = path.split("::").next().unwrap_or("");
+        let allowed = match scope {
+            Scope::Library => !forbidden_std.contains(root),
+            Scope::Binary { allowed_items, .. } => {
+                allowed_items.contains(path) || !forbidden_std.contains(root)
+            }
+        };
+        if !allowed {
+            found.push(format!("std::{path}"));
         }
     }
     for (i, token) in tokens.iter().enumerate() {
@@ -356,15 +406,28 @@ fn violations(
         if forbidden_idents.contains(name) {
             found.push(format!("identifier {name}"));
         }
+        let prev = i.checked_sub(1).and_then(|p| tokens.get(p));
         let next = tokens.get(i + 1);
         if matches!(name.as_str(), "env" | "option_env") && next == Some(&Token::Punct('!')) {
             found.push(format!("macro {name}!"));
         }
-        if matches!(name.as_str(), "std" | "core" | "alloc") && ident(next) == Some("as") {
-            found.push(format!("{name} alias"));
-        }
         if name == "extern" {
             found.push("extern (crate alias or FFI)".to_owned());
+        }
+        // A binary reaches an imported module as `io::stdin()`; that item must
+        // be allowlisted as well.
+        if let Scope::Binary { allowed_items, .. } = scope {
+            if forbidden_std.contains(name)
+                && prev != Some(&Token::PathSep)
+                && next == Some(&Token::PathSep)
+            {
+                if let Some(item) = ident(tokens.get(i + 2)) {
+                    let path = format!("{name}::{item}");
+                    if !allowed_items.contains(&path) {
+                        found.push(format!("std::{path}"));
+                    }
+                }
+            }
         }
         if name == "env" && next == Some(&Token::PathSep) {
             let call = ident(tokens.get(i + 2));
@@ -378,6 +441,8 @@ fn violations(
             }
         }
     }
+    found.sort();
+    found.dedup();
     found
 }
 
@@ -409,7 +474,7 @@ fn library_source_has_no_runtime_io_paths() {
     assert!(!library.is_empty(), "library sources found");
     for path in library {
         let source = fs::read_to_string(&path).expect("library source");
-        let found = violations(&source, &policy, &BTreeSet::new(), None);
+        let found = violations(&source, &policy, &Scope::Library);
         assert!(
             found.is_empty(),
             "{} breaks kernel purity: {found:?}",
@@ -419,7 +484,7 @@ fn library_source_has_no_runtime_io_paths() {
 }
 
 #[test]
-fn binaries_only_use_stdio_exit_codes_and_the_declared_opt_in_flag() {
+fn binaries_only_use_allowlisted_stdio_and_exit_items_and_the_declared_flag() {
     let policy = gate_fixture()["purity_policy"].clone();
     let adapters = policy["binary_adapters"]
         .as_object()
@@ -446,10 +511,14 @@ fn binaries_only_use_stdio_exit_codes_and_the_declared_opt_in_flag() {
             .to_string_lossy()
             .into_owned();
         let adapter = &adapters[&relative];
-        let allowed = string_set(&adapter["allowed_std_modules"]);
-        let env_var = adapter["env_var"].as_str();
+        let mut allowed = string_set(&policy["binary_std_items"]);
+        allowed.extend(string_set(&adapter["extra_std_items"]));
+        let scope = Scope::Binary {
+            allowed_items: &allowed,
+            env_var: adapter["env_var"].as_str(),
+        };
         let source = fs::read_to_string(&path).expect("binary source");
-        let found = violations(&source, &policy, &allowed, env_var);
+        let found = violations(&source, &policy, &scope);
         assert!(
             found.is_empty(),
             "{relative} breaks kernel purity: {found:?}"
@@ -462,7 +531,7 @@ fn binaries_only_use_stdio_exit_codes_and_the_declared_opt_in_flag() {
 #[test]
 fn scanner_catches_impure_mutations_and_ignores_comments_and_strings() {
     let policy = gate_fixture()["purity_policy"].clone();
-    let none = BTreeSet::new();
+    let library = Scope::Library;
     for impure in [
         "use std::net::TcpStream;",
         "use std::{collections::HashMap, fs};",
@@ -479,10 +548,17 @@ fn scanner_catches_impure_mutations_and_ignores_comments_and_strings() {
         "use std as s;",
         "fn f() { let _ = std::time::SystemTime::now(); }",
         "fn f() { let _ = jsonwebtoken::decode::<()>; }",
+        // Review bypasses (BOO-140 PR #1): glob and aliased std imports.
+        "use std::*; pub(crate) fn leak() -> usize { fs::read(\"/etc/passwd\").map(|b| b.len()).unwrap_or(0) }",
+        "use std::{self as s}; pub(crate) fn leak() -> usize { s::fs::read(\"/etc/passwd\").map(|b| b.len()).unwrap_or(0) }",
+        "use core::*;",
+        "use alloc::{vec as v};",
+        "use std::{collections::HashMap as Map};",
+        "use r#std::fs;",
     ] {
         assert!(
-            !violations(impure, &policy, &none, None).is_empty(),
-            "guard missed: {impure}"
+            !violations(impure, &policy, &library).is_empty(),
+            "library guard missed: {impure}"
         );
     }
     for pure in [
@@ -493,33 +569,68 @@ fn scanner_catches_impure_mutations_and_ignores_comments_and_strings() {
         "fn f<'a>(x: &'a str) -> &'a str { x }",
         "use std::{collections::HashSet, fmt, str::FromStr};",
         "struct T { net: i64 }",
+        "use serde::de::Error as DeserializeError;",
     ] {
         assert_eq!(
-            violations(pure, &policy, &none, None),
+            violations(pure, &policy, &library),
             Vec::<String>::new(),
             "false positive: {pure}"
         );
     }
-    let stdio: BTreeSet<String> = ["env", "io", "process"].map(String::from).into();
-    assert!(
-        violations(
-            "use std::env; fn f() { env::var(OTHER_FLAG); }",
-            &policy,
-            &stdio,
-            Some("FLAG")
-        )
-        .contains(&"env::var".to_owned()),
-        "a binary may only read its declared opt-in flag"
-    );
-    assert!(
-        violations(
-            "use std::env; fn f() { env::var(FLAG); }",
-            &policy,
-            &stdio,
-            Some("FLAG")
-        )
-        .is_empty()
-    );
+
+    let mut pilot_items = string_set(&policy["binary_std_items"]);
+    pilot_items.extend(["env", "env::var"].map(String::from));
+    let pilot = Scope::Binary {
+        allowed_items: &pilot_items,
+        env_var: Some("FLAG"),
+    };
+    let shadow_items = string_set(&policy["binary_std_items"]);
+    let shadow = Scope::Binary {
+        allowed_items: &shadow_items,
+        env_var: None,
+    };
+    for (scope, impure) in [
+        (&pilot, "use std::env; fn f() { env::var(OTHER_FLAG); }"),
+        (&shadow, "use std::env; fn f() { env::var(FLAG); }"),
+        // Review bypasses (BOO-140 PR #1): subprocess egress and an aliased env module.
+        (
+            &shadow,
+            "fn main() { let _ = std::process::Command::new(\"curl\").arg(\"https://example.com\").status(); }",
+        ),
+        (
+            &pilot,
+            "use std::env as e; fn main() { let _ = e::vars(); }",
+        ),
+        (&shadow, "use std::process::{Stdio, Child};"),
+        (&shadow, "use std::process; fn main() { process::abort(); }"),
+        (&shadow, "use std::io; fn main() { let _ = io::copy; }"),
+        (&shadow, "use std::io::{self as i};"),
+        (
+            &shadow,
+            "use std::fs; fn main() { let _ = fs::read(\"x\"); }",
+        ),
+        (&shadow, "use std::io::*;"),
+    ] {
+        assert!(
+            !violations(impure, &policy, scope).is_empty(),
+            "binary guard missed: {impure}"
+        );
+    }
+    for (scope, pure) in [
+        (&pilot, "use std::env; fn f() { env::var(FLAG); }"),
+        (
+            &shadow,
+            "use std::io::{self, Read, Write}; use std::process::ExitCode; fn main() -> ExitCode { let _ = io::stdin(); let _ = io::stdout(); ExitCode::SUCCESS }",
+        ),
+        (&shadow, "fn main() { std::process::exit(1) }"),
+    ] {
+        assert_eq!(
+            violations(pure, &policy, scope),
+            Vec::<String>::new(),
+            "binary false positive: {pure}"
+        );
+    }
+
     assert!(!manifest_dependencies("[dependencies]\ntokio = \"1\"\n").is_empty());
     assert_eq!(
         manifest_dependencies("[target.'cfg(unix)'.dependencies]\nlibc = \"0.2\"\n"),

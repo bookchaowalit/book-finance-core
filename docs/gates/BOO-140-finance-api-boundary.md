@@ -115,23 +115,41 @@ in these cases:
   crates, or uses a non-crates.io source.
 - **Library source.** Library files (`src/*.rs`, comments and string literals
   ignored) reach any of these:
-  - `std::{net, fs, env, process, os, io, thread, time}`, including grouped
-    imports like `use std::{fmt, fs}`;
+  - `std::{net, fs, env, process, os, io, thread, time}` (also via `core::`
+    or `alloc::`), with use-trees expanded, so grouped imports like
+    `use std::{fmt, fs}` count;
+  - a glob import below `std`, `core` or `alloc` (`use std::*`);
+  - any `as` alias inside a `std`/`core`/`alloc` use-tree
+    (`use std::{self as s}`, `use std::env as e`, `use std as s`);
   - `env!` or `option_env!`;
-  - `extern`, or an alias of `std`;
+  - `extern` (crate aliases or FFI);
   - any network, HTTP, DB, auth, env-loader or OS crate name, such as `tokio`,
     `reqwest`, `hyper`, `sqlx`, `diesel`, `rusqlite`, `postgres`,
     `jsonwebtoken`, `oauth2` or `dotenv` (full list in the fixture);
-  - the types `TcpStream`, `UdpSocket`, `OpenOptions`, `SystemTime` or
-    `Instant`.
-- **Binary adapters.** A file under `src/bin/` is not declared in the fixture,
-  uses more than stdio and exit codes, or reads any environment variable other
-  than `env::var(FINANCE_CORE_COMMANDS_ENABLED_ENV)` in
-  `finance-command-pilot`.
+  - the identifiers `TcpStream`, `TcpListener`, `UdpSocket`, `OpenOptions`,
+    `SystemTime`, `Instant`, `Command`, `Stdio` or `Child`.
+- **Binary adapters.** Binaries are checked against an item allowlist, not
+  whole modules. A binary fails if any of these hold:
+  - the file under `src/bin/` is not declared in the fixture;
+  - it reaches a std item outside `purity_policy.binary_std_items`:
+    `io`, `io::Read`, `io::Write`, `io::stdin`, `io::stdout`, `io::stderr`,
+    `process::ExitCode` and `process::exit`. This applies both to
+    `std::`-rooted paths and to `io::x` / `process::x` / `env::x` after an
+    import. So `std::process::Command`, `process::abort` and `io::copy` fail;
+  - it uses a glob or `as` alias of a std module;
+  - it reads the environment in any way other than
+    `env::var(FINANCE_CORE_COMMANDS_ENABLED_ENV)` in `finance-command-pilot`,
+    whose only extra items are `env` and `env::var`.
 
-The guard also tests itself: it must flag 15 impure snippets and accept 7
-harmless ones, such as a mention inside a comment or string, a lifetime, or a
-field named `net`.
+The guard also tests itself. For the library it must flag 21 impure snippets,
+including the review bypasses `use std::*` and `use std::{self as s}`, and
+accept 8 harmless ones, such as a mention inside a comment or string, a
+lifetime, or a field named `net`. For the binaries it must flag 10 impure
+snippets, including the review bypasses `std::process::Command::new("curl")`
+and `use std::env as e; e::vars()`, and accept 3 allowed ones.
+
+Known limit: this is a token scan, not a compiler pass. It intentionally
+over-rejects (any alias inside a std use-tree fails, even a harmless one).
 
 Before this change the existing source was checked and passes all of these
 rules. The lockfile holds exactly `itoa, proc-macro2, quote, ryu, serde,
@@ -139,13 +157,13 @@ serde_derive, serde_json, syn, unicode-ident`.
 
 ## Compatibility fixture (cargo test)
 
-`tests/api_boundary_compat_test.rs` runs five checks:
+`tests/api_boundary_compat_test.rs` has six tests covering:
 
 - `public_api` in the fixture must equal the extracted public items and
   inherent `pub` methods of `src/lib.rs`, `src/shadow.rs` and `src/command.rs`
   (63 entries).
 - Each consumer's `uses` entry must be public API. Each in-repo consumer
-  binary must still reference what it claims to use.
+  binary must still reference, as a whole identifier, what it claims to use.
 - Kernel constants must match the fixture: read path, schema, summary service
   and source of truth, command id, and opt-in flag.
 - The endpoint map must cover exactly the contract's nine endpoints. All must
@@ -154,6 +172,10 @@ serde_derive, serde_json, syn, unicode-ident`.
   appear as an owner of an endpoint or an auth class.
 - A consumer-shaped walk through the API (money, ledger, summary parse and
   parity, command preview) must compile and run with no I/O.
+
+Known limit: the public-API extraction scans the three module files named
+above and does not pin `pub` struct fields. A field rename is caught only if
+the consumer walk test uses that field.
 
 ## Gaps
 
@@ -190,9 +212,10 @@ serde_derive, serde_json, syn, unicode-ident`.
 9. **Retired contract.** The named contract is marked retired. The owner must
    decide whether `bookfinance-api-v1` is re-adopted as the target contract or
    superseded.
-10. **Shared-infrastructure branch.** No `codex/shared-infrastructure-20261015`
-    PR exists in this repository (`gh pr diff 1` returns no PR), so there is
-    nothing to merge around.
+10. **Shared-infrastructure branch.** On 2026-10-15,
+    `gh pr list --head codex/shared-infrastructure-20261015 --state all` and
+    `git ls-remote origin 'refs/heads/codex/*'` both returned nothing for this
+    repository. No shared-infrastructure change exists here to merge around.
 
 ## Owner decision — PROPOSED, NOT ACCEPTED
 

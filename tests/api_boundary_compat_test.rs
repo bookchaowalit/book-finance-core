@@ -133,10 +133,14 @@ fn every_consumer_use_is_a_real_public_item() {
         }
         if let Some(path) = consumer["path"].as_str() {
             let source = fs::read_to_string(Path::new(ROOT).join(path)).expect("consumer source");
+            // Whole identifiers only, so `parity` does not match `ShadowParity`.
+            let identifiers: BTreeSet<&str> = source
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .collect();
             for used in strings(&consumer["uses"]) {
                 let leaf = used.rsplit("::").next().expect("item name");
                 assert!(
-                    source.contains(leaf),
+                    identifiers.contains(leaf),
                     "{path} no longer uses {used}; update the consumer fixture"
                 );
             }

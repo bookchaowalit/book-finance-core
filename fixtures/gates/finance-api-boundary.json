@@ -233,15 +233,26 @@
       "libc", "nix", "tempfile", "walkdir"
     ],
     "forbidden_identifiers": [
-      "TcpStream", "TcpListener", "UdpSocket", "OpenOptions", "SystemTime", "Instant"
+      "TcpStream", "TcpListener", "UdpSocket", "OpenOptions", "SystemTime", "Instant",
+      "Command", "Stdio", "Child"
+    ],
+    "binary_std_items": [
+      "io",
+      "io::Read",
+      "io::Write",
+      "io::stdin",
+      "io::stdout",
+      "io::stderr",
+      "process::ExitCode",
+      "process::exit"
     ],
     "binary_adapters": {
       "src/bin/finance-command-pilot.rs": {
-        "allowed_std_modules": ["env", "io", "process"],
+        "extra_std_items": ["env", "env::var"],
         "env_var": "FINANCE_CORE_COMMANDS_ENABLED_ENV"
       },
       "src/bin/finance-v1-shadow.rs": {
-        "allowed_std_modules": ["io", "process"],
+        "extra_std_items": [],
         "env_var": null
       }
     }
