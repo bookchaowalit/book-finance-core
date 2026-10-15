@@ -115,13 +115,16 @@ in these cases:
   crates, or uses a non-crates.io source.
 - **Library source.** Library files (`src/*.rs`, comments and string literals
   ignored) reach any of these:
-  - `std::{net, fs, env, process, os, io, thread, time}` (also via `core::`
+  - `std::{net, fs, path, env, process, os, io, thread, time}` (also via `core::`
     or `alloc::`), with use-trees expanded, so grouped imports like
     `use std::{fmt, fs}` count;
   - a glob import below `std`, `core` or `alloc` (`use std::*`);
   - any `as` alias inside a `std`/`core`/`alloc` use-tree
     (`use std::{self as s}`, `use std::env as e`, `use std as s`);
   - `env!` or `option_env!`;
+  - `include!` or a `#[path = ...]` attribute, which compile code from
+    outside the scanned files (`include_str!`/`include_bytes!` stay allowed:
+    they only embed data at compile time);
   - `extern` (crate aliases or FFI);
   - any network, HTTP, DB, auth, env-loader or OS crate name, such as `tokio`,
     `reqwest`, `hyper`, `sqlx`, `diesel`, `rusqlite`, `postgres`,
@@ -133,7 +136,9 @@ in these cases:
   - the file under `src/bin/` is not declared in the fixture;
   - it reaches a std item outside `purity_policy.binary_std_items`:
     `io`, `io::Read`, `io::Write`, `io::stdin`, `io::stdout`, `io::stderr`,
-    `process::ExitCode` and `process::exit`. This applies both to
+    `process::ExitCode` and `process::exit`. An allowlisted type also
+    allows its associated items, such as `std::process::ExitCode::from`.
+    This applies both to
     `std::`-rooted paths and to `io::x` / `process::x` / `env::x` after an
     import. So `std::process::Command`, `process::abort` and `io::copy` fail;
   - it uses a glob or `as` alias of a std module;
@@ -141,12 +146,14 @@ in these cases:
     `env::var(FINANCE_CORE_COMMANDS_ENABLED_ENV)` in `finance-command-pilot`,
     whose only extra items are `env` and `env::var`.
 
-The guard also tests itself. For the library it must flag 21 impure snippets,
-including the review bypasses `use std::*` and `use std::{self as s}`, and
-accept 8 harmless ones, such as a mention inside a comment or string, a
-lifetime, or a field named `net`. For the binaries it must flag 10 impure
+The guard also tests itself. For the library it must flag 25 impure snippets,
+including the review bypasses `use std::*`, `use std::{self as s}`,
+`Path::new(..).read_dir()`, `Path::new(..).exists()`, `include!` and
+`#[path = ...]`, and accept 11 harmless ones, such as a mention inside a comment or string, a
+lifetime, or a field named `net`. For the binaries it must flag 12 impure
 snippets, including the review bypasses `std::process::Command::new("curl")`
-and `use std::env as e; e::vars()`, and accept 3 allowed ones.
+and `use std::env as e; e::vars()`, and accept 4 allowed ones (including
+`std::process::ExitCode::from`).
 
 Known limit: this is a token scan, not a compiler pass. It intentionally
 over-rejects (any alias inside a std use-tree fails, even a harmless one).

@@ -222,7 +222,7 @@
       "syn",
       "unicode-ident"
     ],
-    "forbidden_std_modules": ["net", "fs", "env", "process", "os", "io", "thread", "time"],
+    "forbidden_std_modules": ["net", "fs", "path", "env", "process", "os", "io", "thread", "time"],
     "forbidden_crates": [
       "tokio", "async_std", "smol", "mio", "socket2",
       "reqwest", "hyper", "ureq", "curl", "isahc", "surf", "h2",

@@ -391,7 +391,16 @@ fn violations(source: &str, policy: &Value, scope: &Scope) -> Vec<String> {
         let allowed = match scope {
             Scope::Library => !forbidden_std.contains(root),
             Scope::Binary { allowed_items, .. } => {
-                allowed_items.contains(path) || !forbidden_std.contains(root)
+                // An allowlisted type or trait also allows its associated items,
+                // e.g. `std::process::ExitCode::from`.
+                allowed_items.iter().any(|item| {
+                    path == item
+                        || (item
+                            .rsplit("::")
+                            .next()
+                            .is_some_and(|leaf| leaf.starts_with(char::is_uppercase))
+                            && path.starts_with(&format!("{item}::")))
+                }) || !forbidden_std.contains(root)
             }
         };
         if !allowed {
@@ -413,6 +422,22 @@ fn violations(source: &str, policy: &Value, scope: &Scope) -> Vec<String> {
         }
         if name == "extern" {
             found.push("extern (crate alias or FFI)".to_owned());
+        }
+        // `include!` and `#[path = ...]` compile code from outside the scanned
+        // files. `include_str!`/`include_bytes!` only embed data and stay allowed.
+        if name == "include" && next == Some(&Token::Punct('!')) {
+            found.push("macro include!".to_owned());
+        }
+        if name == "path"
+            && next == Some(&Token::Punct('='))
+            && prev == Some(&Token::Punct('['))
+            && i >= 2
+            && matches!(
+                tokens.get(i - 2),
+                Some(Token::Punct('#')) | Some(Token::Punct('!'))
+            )
+        {
+            found.push("#[path = ...] attribute".to_owned());
         }
         // A binary reaches an imported module as `io::stdin()`; that item must
         // be allowlisted as well.
@@ -555,6 +580,12 @@ fn scanner_catches_impure_mutations_and_ignores_comments_and_strings() {
         "use alloc::{vec as v};",
         "use std::{collections::HashMap as Map};",
         "use r#std::fs;",
+        // Round-2 review bypasses: filesystem through std::path, and code
+        // compiled from outside src/ via include! or #[path].
+        "pub(crate) fn leak() -> usize { std::path::Path::new(\"/etc\").read_dir().map(|d| d.count()).unwrap_or(0) }",
+        "use std::path::Path; pub(crate) fn leak() -> bool { Path::new(\"/root/.ssh/id_rsa\").exists() }",
+        "#[path = \"../extra/evil.rs\"] pub(crate) mod evil;",
+        "include!(\"../extra/evil.rs\");",
     ] {
         assert!(
             !violations(impure, &policy, &library).is_empty(),
@@ -570,6 +601,9 @@ fn scanner_catches_impure_mutations_and_ignores_comments_and_strings() {
         "use std::{collections::HashSet, fmt, str::FromStr};",
         "struct T { net: i64 }",
         "use serde::de::Error as DeserializeError;",
+        "const FIXTURE: &str = include_str!(\"../fixtures/finance-v1-summary.json\");",
+        "const BYTES: &[u8] = include_bytes!(\"../fixtures/finance-v1-summary.json\");",
+        "#[derive(Debug)] struct S { path: u8 }",
     ] {
         assert_eq!(
             violations(pure, &policy, &library),
@@ -610,6 +644,11 @@ fn scanner_catches_impure_mutations_and_ignores_comments_and_strings() {
             "use std::fs; fn main() { let _ = fs::read(\"x\"); }",
         ),
         (&shadow, "use std::io::*;"),
+        (&shadow, "include!(\"../../extra/evil.rs\");"),
+        (
+            &shadow,
+            "fn main() { let _ = std::path::Path::new(\"/etc\").exists(); }",
+        ),
     ] {
         assert!(
             !violations(impure, &policy, scope).is_empty(),
@@ -623,6 +662,10 @@ fn scanner_catches_impure_mutations_and_ignores_comments_and_strings() {
             "use std::io::{self, Read, Write}; use std::process::ExitCode; fn main() -> ExitCode { let _ = io::stdin(); let _ = io::stdout(); ExitCode::SUCCESS }",
         ),
         (&shadow, "fn main() { std::process::exit(1) }"),
+        (
+            &shadow,
+            "fn main() -> std::process::ExitCode { std::process::ExitCode::from(2) }",
+        ),
     ] {
         assert_eq!(
             violations(pure, &policy, scope),
