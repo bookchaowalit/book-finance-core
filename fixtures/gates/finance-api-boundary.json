@@ -1,0 +1,369 @@
+{
+  "issue": "BOO-140",
+  "system_id": "finance",
+  "next_gate": "Move the authenticated finance API boundary and keep the Rust kernel as a pure compatibility consumer.",
+  "decision_status": "proposed-not-accepted",
+  "evidence_doc": "docs/gates/BOO-140-finance-api-boundary.md",
+  "contract": {
+    "repository": "bookchaowalit/architecture-docs",
+    "path": "systems/architecture/solo-empire-api-contract-v1.md",
+    "anchor": "bookfinance-api-v1",
+    "document_status": "retired",
+    "base_path": "/api/finance/v1",
+    "endpoints": [
+      "/api/finance/v1",
+      "/api/finance/v1/summary",
+      "/api/finance/v1/transactions",
+      "/api/finance/v1/accounts",
+      "/api/finance/v1/investments",
+      "/api/finance/v1/reconciliations",
+      "/api/finance/v1/valuations",
+      "/api/finance/v1/risk-readiness",
+      "/api/finance/v1/invoices"
+    ]
+  },
+  "target_backend": {
+    "repository": "book-finance-api",
+    "remote_status": "not-created",
+    "proposed_role": "read-only aggregation facade that owns /api/finance/v1/* and the finance:read auth class"
+  },
+  "kernel": {
+    "repository": "finance-ledger-core",
+    "crate": "book-finance-core",
+    "role": "pure-compatibility-consumer",
+    "read_path": "/api/finance/v1",
+    "schema_version": "finance.v1",
+    "summary_service": "book-finance-api",
+    "summary_source_of_truth": "sqlite.finance_control_plane",
+    "command_schema_version": "finance.command.v1",
+    "command": "finance.reconciliation.preview",
+    "opt_in_env": "FINANCE_CORE_COMMANDS_ENABLED"
+  },
+  "auth_classes": [
+    {
+      "id": "bearer-finance-read",
+      "contract_control": "Authorization: Bearer <token> with scope finance:read; hashed scoped tokens (API_TOKENS_JSON); every /api/finance/v1/* route",
+      "current_controls": [
+        {
+          "repository": "platform-legacy-api-archive",
+          "control": "none: every GET /api/finance/v1[/*] returns 410 before any auth check (route matrix marks it public)"
+        },
+        {
+          "repository": "finance-*-api (ten cellkit cells)",
+          "control": "platform-issued RS256 JWT for the <cell>-api audience, then platform /v1/authz/decide for <cell>.<resource>:read on every read"
+        },
+        {
+          "repository": "sales-crm (crm-api ledger)",
+          "control": "one shared static bearer CRM_API_TOKEN (constant-time compare); reads fail 503 in production without it"
+        }
+      ],
+      "target_control": "book-finance-api verifies the client finance:read token, then calls cells with a platform-issued token and the CRM ledger server-side; client tokens are never forwarded",
+      "kernel_role": "none"
+    },
+    {
+      "id": "public-read",
+      "contract_control": "CORS allowlist and public-field review; not used by any /api/finance/v1 route",
+      "current_controls": [],
+      "target_control": "not applicable to the finance facade",
+      "kernel_role": "none"
+    },
+    {
+      "id": "signed-webhook",
+      "contract_control": "x-line-signature or stripe-signature; not used by any /api/finance/v1 route",
+      "current_controls": [],
+      "target_control": "not applicable to the finance facade",
+      "kernel_role": "none"
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/finance/v1",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "orphaned: archive returns 410, no live facade",
+        "sources": [
+          {"repository": "platform-legacy-api-archive", "route": "GET /api/finance/v1 -> 410 Gone"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "facade-owned discovery document"},
+      "kernel_consumer": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/finance/v1/summary",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "split across four cells and the CRM ledger; no aggregator",
+        "sources": [
+          {"repository": "finance-transactions-api", "route": "GET /v1/transactions", "permission": "transactions.transaction:read", "summary_field": "transactions"},
+          {"repository": "sales-crm", "route": "GET /api/v1/crm/ledger/revenue", "permission": "CRM_API_TOKEN", "summary_field": "revenue"},
+          {"repository": "sales-crm", "route": "GET /api/v1/crm/ledger/invoices", "permission": "CRM_API_TOKEN", "summary_field": "invoices"},
+          {"repository": "finance-accounts-api", "route": "GET /v1/accounts?status=active", "permission": "finance-accounts.account:read", "summary_field": "accounts.active"},
+          {"repository": "finance-liabilities-api", "route": "GET /v1/liabilities", "permission": "liabilities.liability:read", "summary_field": "liabilities"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "aggregate built from the sources, validated by the kernel before it is served"},
+      "kernel_consumer": "book_finance_core::shadow::FinanceV1Summary::from_json"
+    },
+    {
+      "method": "GET",
+      "path": "/api/finance/v1/transactions",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "cell",
+        "sources": [
+          {"repository": "finance-transactions-api", "route": "GET /v1/transactions", "permission": "transactions.transaction:read"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "proxy with contract query mapping and field allowlist"},
+      "kernel_consumer": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/finance/v1/accounts",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "cell",
+        "sources": [
+          {"repository": "finance-accounts-api", "route": "GET /v1/accounts", "permission": "finance-accounts.account:read"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "proxy with field allowlist (no metadata, no notes)"},
+      "kernel_consumer": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/finance/v1/investments",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "cell",
+        "sources": [
+          {"repository": "finance-investments-api", "route": "GET /v1/investments", "permission": "investments.investment:read"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "proxy with field allowlist (no metadata, no notes)"},
+      "kernel_consumer": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/finance/v1/reconciliations",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "cell",
+        "sources": [
+          {"repository": "finance-reconciliations-api", "route": "GET /v1/reconciliations", "permission": "reconciliations.reconciliation:read"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "proxy with field allowlist (no source references, no notes)"},
+      "kernel_consumer": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/finance/v1/valuations",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "cell, but the contract's latest/status/currency filters do not exist there",
+        "sources": [
+          {"repository": "finance-investments-api", "route": "GET /v1/valuations", "permission": "investments.valuation:read"},
+          {"repository": "finance-investments-api", "route": "GET /v1/market-prices", "permission": "investments.market-price:read"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "facade-computed latest-per-position view over the cell"},
+      "kernel_consumer": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/finance/v1/risk-readiness",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "orphaned: derived gate with no owning cell; FX snapshot contract has no cell",
+        "sources": [
+          {"repository": "finance-investments-api", "route": "GET /v1/valuations", "permission": "investments.valuation:read"},
+          {"repository": "finance-investments-api", "route": "GET /v1/market-prices", "permission": "investments.market-price:read"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "facade-computed fail-closed readiness gate"},
+      "kernel_consumer": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/finance/v1/invoices",
+      "auth_class": "bearer-finance-read",
+      "current_owner": {
+        "status": "CRM ledger",
+        "sources": [
+          {"repository": "sales-crm", "route": "GET /api/v1/crm/ledger/invoices", "permission": "CRM_API_TOKEN"}
+        ]
+      },
+      "target_boundary": {"repository": "book-finance-api", "kind": "server-side proxy; CRM token never leaves the facade"},
+      "kernel_consumer": null
+    }
+  ],
+  "unmapped_cells": [
+    "finance-budgets-api",
+    "finance-cash-flow-api",
+    "finance-business-assets-api",
+    "finance-subscriptions-api",
+    "finance-tax-api"
+  ],
+  "purity_policy": {
+    "dependencies": ["serde", "serde_json"],
+    "dev_dependencies": [],
+    "build_dependencies": [],
+    "lockfile_packages": [
+      "itoa",
+      "proc-macro2",
+      "quote",
+      "ryu",
+      "serde",
+      "serde_derive",
+      "serde_json",
+      "syn",
+      "unicode-ident"
+    ],
+    "forbidden_std_modules": ["net", "fs", "env", "process", "os", "io", "thread", "time"],
+    "forbidden_crates": [
+      "tokio", "async_std", "smol", "mio", "socket2",
+      "reqwest", "hyper", "ureq", "curl", "isahc", "surf", "h2",
+      "axum", "actix_web", "warp", "rocket", "tower", "tonic",
+      "sqlx", "diesel", "rusqlite", "postgres", "tokio_postgres", "mysql", "redis", "sea_orm", "mongodb",
+      "jsonwebtoken", "oauth2", "openidconnect", "rustls", "openssl", "native_tls",
+      "dotenv", "dotenvy", "envy",
+      "libc", "nix", "tempfile", "walkdir"
+    ],
+    "forbidden_identifiers": [
+      "TcpStream", "TcpListener", "UdpSocket", "OpenOptions", "SystemTime", "Instant"
+    ],
+    "binary_adapters": {
+      "src/bin/finance-command-pilot.rs": {
+        "allowed_std_modules": ["env", "io", "process"],
+        "env_var": "FINANCE_CORE_COMMANDS_ENABLED_ENV"
+      },
+      "src/bin/finance-v1-shadow.rs": {
+        "allowed_std_modules": ["io", "process"],
+        "env_var": null
+      }
+    }
+  },
+  "public_api": [
+    "book_finance_core::AccountId",
+    "book_finance_core::AccountId::as_str",
+    "book_finance_core::AccountId::new",
+    "book_finance_core::Currency",
+    "book_finance_core::Currency::code",
+    "book_finance_core::Currency::scale",
+    "book_finance_core::Direction",
+    "book_finance_core::DomainError",
+    "book_finance_core::FINANCE_V1_READ_PATH",
+    "book_finance_core::FINANCE_V1_SCHEMA_VERSION",
+    "book_finance_core::LedgerBook",
+    "book_finance_core::LedgerBook::account_balance",
+    "book_finance_core::LedgerBook::entries",
+    "book_finance_core::LedgerBook::post",
+    "book_finance_core::LedgerEntry",
+    "book_finance_core::LedgerEntry::postings",
+    "book_finance_core::LedgerEntry::transaction_id",
+    "book_finance_core::LedgerEntry::try_new",
+    "book_finance_core::Money",
+    "book_finance_core::Money::allocate",
+    "book_finance_core::Money::checked_add",
+    "book_finance_core::Money::checked_neg",
+    "book_finance_core::Money::checked_sub",
+    "book_finance_core::Money::currency",
+    "book_finance_core::Money::is_zero",
+    "book_finance_core::Money::minor_units",
+    "book_finance_core::Money::new",
+    "book_finance_core::Money::parse",
+    "book_finance_core::Money::to_decimal_string",
+    "book_finance_core::Posting",
+    "book_finance_core::Posting::account_id",
+    "book_finance_core::Posting::amount",
+    "book_finance_core::Posting::credit",
+    "book_finance_core::Posting::debit",
+    "book_finance_core::Posting::direction",
+    "book_finance_core::TransactionId",
+    "book_finance_core::TransactionId::as_str",
+    "book_finance_core::TransactionId::new",
+    "book_finance_core::command",
+    "book_finance_core::command::CommandEnvelope",
+    "book_finance_core::command::CommandEnvelope::from_json",
+    "book_finance_core::command::CommandError",
+    "book_finance_core::command::CommandExecutor",
+    "book_finance_core::command::CommandExecutor::execute",
+    "book_finance_core::command::FINANCE_COMMAND_SCHEMA_VERSION",
+    "book_finance_core::command::FINANCE_CORE_COMMANDS_ENABLED_ENV",
+    "book_finance_core::command::IdempotencyKey",
+    "book_finance_core::command::IdempotencyKey::new",
+    "book_finance_core::command::RECONCILIATION_PREVIEW_COMMAND",
+    "book_finance_core::command::ReconciliationPreview",
+    "book_finance_core::command::feature_flag_enabled",
+    "book_finance_core::shadow",
+    "book_finance_core::shadow::FINANCE_V1_SERVICE",
+    "book_finance_core::shadow::FINANCE_V1_SOURCE_OF_TRUTH",
+    "book_finance_core::shadow::FinanceV1Summary",
+    "book_finance_core::shadow::FinanceV1Summary::from_json",
+    "book_finance_core::shadow::FinanceV1Summary::parity",
+    "book_finance_core::shadow::InvoiceAggregate",
+    "book_finance_core::shadow::LiabilityAggregate",
+    "book_finance_core::shadow::RevenueAggregate",
+    "book_finance_core::shadow::ShadowError",
+    "book_finance_core::shadow::ShadowParity",
+    "book_finance_core::shadow::TransactionAggregate"
+  ],
+  "consumers": [
+    {
+      "name": "finance-v1-shadow",
+      "kind": "binary (stdin JSON -> parity line)",
+      "path": "src/bin/finance-v1-shadow.rs",
+      "uses": [
+        "book_finance_core::shadow::FinanceV1Summary",
+        "book_finance_core::shadow::FinanceV1Summary::from_json",
+        "book_finance_core::shadow::FinanceV1Summary::parity"
+      ]
+    },
+    {
+      "name": "finance-command-pilot",
+      "kind": "binary (opt-in flag, stdin envelope -> preview JSON)",
+      "path": "src/bin/finance-command-pilot.rs",
+      "uses": [
+        "book_finance_core::command::CommandEnvelope",
+        "book_finance_core::command::CommandEnvelope::from_json",
+        "book_finance_core::command::CommandExecutor",
+        "book_finance_core::command::CommandExecutor::execute",
+        "book_finance_core::command::FINANCE_CORE_COMMANDS_ENABLED_ENV",
+        "book_finance_core::command::feature_flag_enabled"
+      ]
+    },
+    {
+      "name": "solo-empire task test:finance-shadow",
+      "kind": "external loopback harness piping a finance.v1 summary into the finance-v1-shadow binary",
+      "path": null,
+      "uses": [
+        "book_finance_core::shadow::FinanceV1Summary::from_json"
+      ]
+    },
+    {
+      "name": "solo-empire task test:finance-command",
+      "kind": "external harness piping a command envelope into the finance-command-pilot binary",
+      "path": null,
+      "uses": [
+        "book_finance_core::command::CommandEnvelope::from_json",
+        "book_finance_core::command::CommandExecutor::execute"
+      ]
+    },
+    {
+      "name": "book-finance-api (proposed, not created)",
+      "kind": "future facade validating the summary it serves (library dependency if Rust, otherwise the stdin binary)",
+      "path": null,
+      "uses": [
+        "book_finance_core::shadow::FinanceV1Summary::from_json",
+        "book_finance_core::shadow::FinanceV1Summary::parity",
+        "book_finance_core::Money::parse",
+        "book_finance_core::Money::to_decimal_string",
+        "book_finance_core::FINANCE_V1_READ_PATH",
+        "book_finance_core::FINANCE_V1_SCHEMA_VERSION"
+      ]
+    }
+  ]
+}
